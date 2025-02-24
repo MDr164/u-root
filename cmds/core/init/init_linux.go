@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -36,9 +37,6 @@ func osInitGo() *initCmds {
 
 	// Turn off job control when test mode is on.
 	ctty := libinit.WithTTYControl(!*test)
-
-	// Output to all consoles if requested.
-	mtty := libinit.WithMultiTTY(*kerneltty, libinit.OpenTTYDevices, cmdline.Consoles())
 
 	// Install modules before exec-ing into user mode below
 	if err := libinit.InstallAllModules(); err != nil {
@@ -72,21 +70,31 @@ func osInitGo() *initCmds {
 	}
 	uinitArgs := libinit.WithArguments(args...)
 
+	shells := []*exec.Cmd{}
+	for _, console := range cmdline.Consoles() {
+		fd, err := os.OpenFile(filepath.Join("/dev", console), os.O_RDWR, 0)
+		if err != nil {
+			log.Printf("Failed to open console %s: %v", console, err)
+			continue
+		}
+		shells = append(shells, libinit.Command("/bin/defaultsh", ctty, libinit.WithStderr(fd), libinit.WithStdout(fd), libinit.WithStdin(fd)))
+		shells = append(shells, libinit.Command("/bin/sh", ctty, libinit.WithStderr(fd), libinit.WithStdout(fd), libinit.WithStdin(fd)))
+	}
+
+	cmds := append([]*exec.Cmd{
+		// inito is (optionally) created by the u-root command when the
+		// u-root initramfs is merged with an existing initramfs that
+		// has a /init. The name inito means "original /init" There may
+		// be an inito if we are building on an existing initramfs. All
+		// initos need their own pid space.
+		libinit.Command("/inito", libinit.WithCloneFlags(syscall.CLONE_NEWPID), ctty),
+
+		libinit.Command("/bbin/uinit", ctty, uinitArgs),
+		libinit.Command("/bin/uinit", ctty, uinitArgs),
+		libinit.Command("/buildbin/uinit", ctty, uinitArgs),
+	}, shells...)
+
 	return &initCmds{
-		cmds: []*exec.Cmd{
-			// inito is (optionally) created by the u-root command when the
-			// u-root initramfs is merged with an existing initramfs that
-			// has a /init. The name inito means "original /init" There may
-			// be an inito if we are building on an existing initramfs. All
-			// initos need their own pid space.
-			libinit.Command("/inito", libinit.WithCloneFlags(syscall.CLONE_NEWPID), ctty, mtty),
-
-			libinit.Command("/bbin/uinit", ctty, mtty, uinitArgs),
-			libinit.Command("/bin/uinit", ctty, mtty, uinitArgs),
-			libinit.Command("/buildbin/uinit", ctty, mtty, uinitArgs),
-
-			libinit.Command("/bin/defaultsh", ctty, mtty),
-			libinit.Command("/bin/sh", ctty, mtty),
-		},
+		cmds: cmds,
 	}
 }
